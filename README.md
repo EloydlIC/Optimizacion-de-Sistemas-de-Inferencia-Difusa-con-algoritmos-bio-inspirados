@@ -2,7 +2,9 @@
 El código utilizado para el trabajo de la asignatura de Modelización con incertidumbre, información difusa y soft computing. Se implementa un algoritmo de optimización por enjambre de partículas (PSO) y un algoritmo genético clásico (GA) para un problema de control muy sencillo.
 
 **Descripción de las funciones del código fuente (FISControlOpt.py)**
-simular_tubo: Es el motor físico del proyecto. Simula la gravedad, el tubo neumático y el comportamiento de la bola bajo la influencia del controlador difuso en cada instante de tiempo. Al final de la simulación, calcula una "pérdida" (error) evaluando qué tan lejos se quedó la bola de la altura objetivo, penalizando también el uso excesivo o brusco de la fuerza del ventilador.
+
+
+- **simular_tubo**: Es el motor físico del proyecto. Simula la gravedad, el tubo neumático y el comportamiento de la bola bajo la influencia del controlador difuso en cada instante de tiempo. Al final de la simulación, calcula una "pérdida" (error) evaluando qué tan lejos se quedó la bola de la altura objetivo, penalizando también el uso excesivo o brusco de la fuerza del ventilador.
 
 - **Clases FS y SugenoFIS (y sus métodos eval)**: Definen la estructura matemática del controlador lógico difuso. FS crea los conjuntos difusos (funciones de pertenencia, como campanas de Gauss) para categorizar el error de posición y la velocidad. Por su parte, SugenoFIS agrupa estos conjuntos, evalúa las reglas lógicas (inferencia de Sugeno de orden 0) y decide la fuerza exacta que debe aplicar el ventilador (defuzzificación).
 
