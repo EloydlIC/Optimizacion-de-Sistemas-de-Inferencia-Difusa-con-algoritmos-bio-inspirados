@@ -11,7 +11,7 @@ def simular_tubo(FIS, altura_deseada=10.0, coef_fuerza = 0.05, coef_suavidad = 0
     
     """
     Simula la física de la bola y el controlador.
-    Parámetros de entrada del PSO: [K_pos, K_desplazamiento, Fuerza_Base]
+    Parámetros de entrada del PSO: [posición, desplazamiento]
     """
 
     dt = tiempo_final/pasos_tiempo
@@ -26,14 +26,13 @@ def simular_tubo(FIS, altura_deseada=10.0, coef_fuerza = 0.05, coef_suavidad = 0
     historial_y = []
     historial_fuerza = []
     for este_paso in range(pasos_tiempo):
-        # Posición (vista como error respecto al objetivo)
         error_posicion = y - altura_deseada
-        # Velocidad media desde el último instante
         velocidad = (y - y_prev)/dt
         
         fuerza = max(0, FIS.eval(error_posicion, velocidad))
         historial_fuerza.append(fuerza)
-        # --- PERTURBACIÓN Y FÍSICA ---
+
+        # Si asumimos que el entorno es ruidoso, se incluyen perturbaciones en la fuerza aplicada
         if noisy:
             if noise is None:
                 interferencia = np.random.normal(0, 1.5)
@@ -44,11 +43,9 @@ def simular_tubo(FIS, altura_deseada=10.0, coef_fuerza = 0.05, coef_suavidad = 0
         else: 
             interferencia = 0
         
-        # Segunda Ley de Newton: Fuerza Neta = Masa * Aceleración
+        # Actualización de la dinámica de la bola
         fuerza_neta = fuerza - (m * g) + interferencia
         aceleracion = fuerza_neta / m
-        
-        # Actualización de cinemática (Método de Euler)
         v += aceleracion * dt
         y_prev = y
         y += v * dt
@@ -62,6 +59,7 @@ def simular_tubo(FIS, altura_deseada=10.0, coef_fuerza = 0.05, coef_suavidad = 0
         
     # FUNCIÓN DE PÉRDIDA: MAE
     perdida = np.mean(np.abs(np.array(historial_y) - altura_deseada))
+    # Penalizaciones a la fuerza o a la variación de la fuerza
     if penalizar_fuerza:
         perdida += coef_fuerza * np.mean(np.abs(np.array(historial_fuerza)))
     if penalizar_suavidad:
@@ -70,7 +68,14 @@ def simular_tubo(FIS, altura_deseada=10.0, coef_fuerza = 0.05, coef_suavidad = 0
     return perdida, historial_y
 
 class FS:
+    # Esta clase representa los Fuzzy Sets con funciones de pertenencia triangulares o gaussianas
     def __init__(self, centro, sigma, tipo):
+        """        
+        centro: El punto de pertenencia 1
+        sigma: Amplitud de la función de pertenencia. En triangulares es la mitad de la longitud del rango,
+            en gaussianas es la desviavión típica.
+        tipo: Los valores válidos son "gaussiano" o "triangular". 
+        """
         self.tipo = tipo
         self.c = centro
         self.sigma = sigma
@@ -86,7 +91,12 @@ class FS:
 class SugenoFIS:
     def __init__(self, parametros, tipo = "gaussiano"):
         """
-        Inicializa el FIS con un vector de 21 parámetros.
+        Inicializa el FIS de Sugeno (de orden 0) con una lista.
+        parametros = [parametros_error, parametros_vel, consecuentes]
+        parametros_error = [centros_error, sigmas_error]
+        parametros_vel = [centros_vel, sigmas_vel]
+        consecuentes debe ser una matriz con tantas filas como conjuntos borrosos del error
+            y tantas columnas como conjuntos borrosos de la velocidad
         """
         self.FSs_errores = []
         self.FSs_velocidades = []
@@ -95,7 +105,6 @@ class SugenoFIS:
         centros_error, sigmas_error = parametros_error
         centros_vel, sigmas_vel = parametros_vel
 
-        # Parámetros de las Funciones de Pertenencia del ERROR (Centros y Sigmas)1
         if (len(centros_error) != len(sigmas_error)):
             raise ValueError(f"Los centros ({len(centros_error)}) y las sigmas ({len(sigmas_error)}) de los errores no tienen la misma longitud")
         if (len(centros_vel) != len(sigmas_vel)):
@@ -124,7 +133,6 @@ class SugenoFIS:
 
         evals_reglas = np.outer(eval_FSs_errores, eval_FSs_velocidades)
         
-        # 3. Defuzzificación (Suma ponderada de Sugeno)
         suma_pesos = np.sum(evals_reglas)
         if suma_pesos == 0:
             return 0.0
@@ -133,7 +141,9 @@ class SugenoFIS:
         return salida
     
 def fis_desde_particula(particula, n_e, n_v, tipo = "gaussiano"):
-    """ Vector -> objeto SugenoFIS."""
+    """
+    Vector -> objeto SugenoFIS.
+    """
     idx = 0
     
     c_error = particula[idx : idx+n_e]; idx += n_e
@@ -144,12 +154,14 @@ def fis_desde_particula(particula, n_e, n_v, tipo = "gaussiano"):
     
     consecuentes = particula[idx : idx+(n_e*n_v)].reshape((n_e, n_v))
     
-    # Esta es exactamente la tupla de tuplas que espera el __init__ de tu clase
+    # Esta es exactamente la tupla de tuplas que espera el __init__
     parametros = ((c_error, s_error), (c_vel, s_vel), consecuentes)
     return SugenoFIS(parametros, tipo)
 
 def particula_desde_fis(fis):
-    
+    """
+    Objeto SugenoFIS -> vector.
+    """
     idx = 0
     n_e = len(fis.FSs_errores)
     n_v = len(fis.FSs_velocidades)
@@ -165,16 +177,19 @@ def particula_desde_fis(fis):
     particula = np.concatenate([c_error, s_error, c_vel, s_vel, consecuentes])
     return particula
 
-def generar_poblacion(fis_buenos, tamano, lim_min, lim_max, 
-                      porcentaje_expertos=0.15, 
-                      porcentaje_interpolacion=0.25, 
+def generar_poblacion( tamano, lim_min, lim_max, fis_buenos = None,
+                      porcentaje_expertos=0.15, porcentaje_interpolacion=0.25, 
                       ruido_sigma=0.03):
     """
-    Crea una población robusta y continua para el PSO combinando:
-    1. Expertos (FIS procedentes del AG).
-    2. Interpolación: Cruce lineal entre expertos para rellenar el espacio entre ellos.
-    3. Exploración local: Clones con ruido de los expertos.
-    4. Diversidad: Individuos aleatorios.
+    Si no se dan fis_buenos, genera aleatoriamente la población dentro de los 
+    límites definidos.
+
+    Si se dan, genera un porcentaje de la población como combinaciones convexas
+    de dos elementos de fis_buenos, y otro porcentaje como variaciones pequeñas
+    de elementos de fis_buenos.
+
+    Devuelve la población como una lista de vectores con todos los parámetros del
+    FIS concatenados.
     """
     dim = len(lim_min)
     poblacion_total = []
@@ -218,6 +233,10 @@ def generar_poblacion(fis_buenos, tamano, lim_min, lim_max,
     return np.array(poblacion_total)[:tamano]
 
 def graficar_fis(fis, historial, init, pasos = 100, tiempo_final = 5, resolucion = 50):  
+    """
+    Grafica todo lo necesario sobre el FIS. Como genera dos figuras, al final uso más la 
+    otra función, graficar_fis_limpio.
+    """
     tiempo = np.linspace(0, tiempo_final, pasos)
 
     perdida_final = 0
@@ -228,10 +247,9 @@ def graficar_fis(fis, historial, init, pasos = 100, tiempo_final = 5, resolucion
         perdida_final += perdida/len(init)
     print(f"\nOptimización finalizada. Pérdida final: {perdida_final:.3f} m")
     
-    # 3. Visualización de los resultados
     fig = plt.figure(figsize=(16, 10))
     
-    # --- Gráfica 1: Trayectoria de la bola ---
+    # Gráfica 1: Trayectoria de la bola
     ax1 = plt.subplot(2, 2, 1)
     for trayectoria in trayectorias:
         ax1.plot(tiempo, trayectoria, lw=2)
@@ -241,7 +259,7 @@ def graficar_fis(fis, historial, init, pasos = 100, tiempo_final = 5, resolucion
     ax1.set_ylabel("Altura")
     ax1.grid(True, alpha=0.3)
     
-# --- Gráfica 2: Convergencia del PSO ---
+    # Gráfica 2: Gráfica de pérdida durante el aprendizaje
     ax2 = plt.subplot(2, 2, 2)
     ax2.plot(historial, color='#2ca02c', lw=2)
     ax2.set_title("Curva de Aprendizaje")
@@ -249,7 +267,7 @@ def graficar_fis(fis, historial, init, pasos = 100, tiempo_final = 5, resolucion
     ax2.set_ylabel("Pérdida")
     ax2.grid(True, alpha=0.3)
     
-    # --- Gráfica 3: Funciones de pertenencia del ERROR ---
+    # Gráfica 3: Funciones de pertenencia del error
     ax3 = plt.subplot(2, 2, 3)
     x_error = np.linspace(-10, 15, 200)
     colores = ['red', 'green', 'blue', 'orange', 'purple']
@@ -259,7 +277,7 @@ def graficar_fis(fis, historial, init, pasos = 100, tiempo_final = 5, resolucion
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
-# --- Gráfica 4: Funciones de pertenencia de la VELOCIDAD ---
+    # Gráfica 4: Funciones de pertenencia de la velocidad
     ax4 = plt.subplot(2, 2, 4)
     x_vel = np.linspace(-20, 20, 200)
     for i, fs in enumerate(fis.FSs_velocidades):
@@ -299,6 +317,11 @@ def graficar_fis(fis, historial, init, pasos = 100, tiempo_final = 5, resolucion
     plt.show()
 
 def graficar_fis_limpio(fis, init, pasos = 100, tiempo_final = 5, resolucion = 50):  
+    """
+    Muestra una figura con 4 gráficas: las trayectorias, la superficie de salida del FIS, 
+    las funciones de pertenencia para el error y las funciones de pertenencia para la
+    velocidad.
+    """
     tiempo = np.linspace(0, tiempo_final, pasos)
 
     perdida_final = 0
@@ -308,7 +331,6 @@ def graficar_fis_limpio(fis, init, pasos = 100, tiempo_final = 5, resolucion = 5
         trayectorias.append(trayectoria)
         perdida_final += perdida / len(init)
     
-    # --- 1. PREPARAR DATOS PARA LA GRÁFICA 3D ---
     rango_error = np.linspace(-10, 10, resolucion)
     rango_velocidad = np.linspace(-20, 20, resolucion)
     X_err, Y_vel = np.meshgrid(rango_error, rango_velocidad)
@@ -318,11 +340,10 @@ def graficar_fis_limpio(fis, init, pasos = 100, tiempo_final = 5, resolucion = 5
         for j in range(X_err.shape[1]):
             Z_fuerza[i, j] = fis.eval(X_err[i, j], Y_vel[i, j])
     
-    # --- 2. VISUALIZACIÓN EN UN SOLO PLOT DE 4 PANELES ---
     fig = plt.figure(figsize=(16, 10))
     colores = ['red', 'green', 'blue', 'orange', 'purple']
     
-    # --- Gráfica 1: Trayectoria de la bola (2D) ---
+    # Gráfica 1: Trayectorias de la bola
     ax1 = fig.add_subplot(2, 2, 1)
     for trayectoria in trayectorias:
         ax1.plot(tiempo, trayectoria, lw=2)
@@ -333,8 +354,7 @@ def graficar_fis_limpio(fis, init, pasos = 100, tiempo_final = 5, resolucion = 5
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # --- Gráfica 2: Superficie de Control (3D) ---
-    # Usamos projection='3d' para este subplot específico
+    # Gráfica 2: Superficie de Control
     ax2 = fig.add_subplot(2, 2, 2, projection='3d')
     surf = ax2.plot_surface(X_err, Y_vel, Z_fuerza, 
                            cmap=cm.coolwarm, 
@@ -349,7 +369,7 @@ def graficar_fis_limpio(fis, init, pasos = 100, tiempo_final = 5, resolucion = 5
     ax2.set_zlabel("\nFuerza (N)")
     ax2.view_init(elev=20., azim=45)
     
-    # --- Gráfica 3: Funciones de pertenencia del ERROR (2D) ---
+    # Gráfica 3: Funciones de pertenencia del error
     ax3 = fig.add_subplot(2, 2, 3)
     x_error = np.linspace(-20, 20, 200)
     for i, fs in enumerate(fis.FSs_errores):
@@ -358,7 +378,7 @@ def graficar_fis_limpio(fis, init, pasos = 100, tiempo_final = 5, resolucion = 5
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
-    # --- Gráfica 4: Funciones de pertenencia de la VELOCIDAD (2D) ---
+    # Gráfica 4: Funciones de pertenencia de la velocidad
     ax4 = fig.add_subplot(2, 2, 4)
     x_vel = np.linspace(-20, 20, 200)
     for i, fs in enumerate(fis.FSs_velocidades):
@@ -377,9 +397,9 @@ def animar_control(FIS, init=(0,0), altura_deseada = 10.0, tiempo_final = 5, pas
     Derecha: Dos barras verticales indicando Velocidad y Fuerza aplicada en tiempo real.
     """
     
-    # 1. GENERAR DATOS COMPLETOS DE LA TRAYECTORIA (Física y Control)
-    # Necesitamos una versión de simular_tubo que devuelva y, v, y fuerza.
-    # Como no la tengo definida, asumo que 'simular_tubo' ya lo hace o la simulo rápido aquí:
+    #GENERAR DATOS COMPLETOS DE LA TRAYECTORIA
+    # Necesitamos una versión de simular_tubo que devuelva y, v, y fuerza, la cual hago
+    # aquí, ya que no la uso en otro contexto.
     
     y_hist, vel_hist, fuerza_hist = [], [], []
     dt = tiempo_final/pasos
@@ -387,62 +407,54 @@ def animar_control(FIS, init=(0,0), altura_deseada = 10.0, tiempo_final = 5, pas
     y, v = init[0], init[1]
     y_prev = y - v*dt
     
-    # Simulación limpia (noisy=False) para la animación
     for _ in range(pasos):
         err_pos = y - altura_deseada
-        fuerza = max(0, FIS.eval(err_pos, v)) # Asumimos FIS.eval(err, vel)
+        fuerza = max(0, FIS.eval(err_pos, v))
         
-        # Guardar estado actual
         y_hist.append(y)
         vel_hist.append(v)
         fuerza_hist.append(fuerza)
         
-        # Física (Euler)
         fuerza_neta = fuerza - (m * g)
         aceleracion = fuerza_neta / m
         v += aceleracion * dt
         y_prev = y
         y += v * dt
-        if y < 0: y, v = 0.0, -0.3*v # Suelo
+        if y < 0: y, v = 0.0, -0.3*v
 
-    
+    # Hago la animación con FuncAnimation. Como tiene en realidad tres gráficas, esto es larguísimo
     fig, (ax_tubo, ax_vel, ax_fuerza) = plt.subplots(1, 3, figsize=(4, 7), 
                                                      gridspec_kw={'width_ratios': [1.5, 1, 1]})
     
-    # --- A. Panel Tubo (Izquierda) ---
+    # Panel del tubo
     ax_tubo.set_xlim(-1.3, 1.3)
     ax_tubo.set_ylim(0, 22)
     ax_tubo.set_aspect('equal', adjustable='box') 
     ax_tubo.set_xticks([])
     ax_tubo.set_title("Simulación Física", fontsize=12, pad=10)
     
-    # Dibujar paredes del tubo (ensanchadas a +/-1.1 para dar aire)
     ax_tubo.plot([-1.1, -1.1], [0, 22], color='black', lw=4)
     ax_tubo.plot([ 1.1,  1.1], [0, 22], color='black', lw=4)
     
-    # Línea de objetivo
     ax_tubo.axhline(y=altura_deseada, color='red', linestyle='--', alpha=0.7)
     
-    # La bola (Radio 0.9 es grande, ensanchamos límites X para que quepa bien)
+    # La bola 
     bola = patches.Circle((0, y_hist[0]), 0.9, color='dodgerblue', zorder=3, ec='black', lw=1)
     ax_tubo.add_patch(bola)
 
-    # --- B. Panel Barra Velocidad (Centro) ---
+    # Panel de la velocidad
     ax_vel.set_title("Velocidad\n(m/s)", fontsize=11)
-    # Límites para velocidad: Asumimos rango +/- 15 m/s
     v_limit = 15 
     ax_vel.set_xlim(0, 1)
     ax_vel.set_ylim(-v_limit, v_limit*1.2)
     ax_vel.set_xticks([])
     ax_vel.grid(True, axis='y', alpha=0.3)
-    ax_vel.axhline(y=0, color='black', lw=1) # Línea de v=0
-    
-    # Barra de velocidad (inicialmente en v=0, centrada en x=0.5)
+    ax_vel.axhline(y=0, color='black', lw=1)
+
     bar_vel = ax_vel.bar(0.5, 0, width=0.6, color='seagreen', alpha=0.8, align='center')[0]
 
-    # --- C. Panel Barra Fuerza (Derecha) ---
+    # Panel de la fuerza
     ax_fuerza.set_title("Fuerza Control\n(N)", fontsize=11)
-    # Límites para fuerza: De 0 a la fuerza máxima esperada (ej. 40N)
     f_limit = 60 
     ax_fuerza.set_xlim(0, 1)
     ax_fuerza.set_ylim(0, f_limit)
@@ -450,23 +462,22 @@ def animar_control(FIS, init=(0,0), altura_deseada = 10.0, tiempo_final = 5, pas
     ax_fuerza.grid(True, axis='y', alpha=0.3)
     ax_fuerza.axhline(y=9.81, color='red', linestyle=':', alpha=0.5) # Línea de Gravedad
     
-    # Barra de fuerza (inicialmente en F=0)
     bar_fuerza = ax_fuerza.bar(0.5, 0, width=0.6, color='tomato', alpha=0.8, align='center')[0]
 
-    # 3. FUNCIÓN DE ACTUALIZACIÓN PARA LA ANIMACIÓN
+    # FUNCIÓN DE ACTUALIZACIÓN PARA LA ANIMACIÓN
     def update(frame):
-        # A. Actualizar bola
+        # Actualizar bola
         bola.set_center((0, y_hist[frame]))
         
-        # B. Actualizar Barra Velocidad
+        # Actualizar Barra Velocidad
         v_actual = vel_hist[frame]
         bar_vel.set_height(v_actual)
         
-        # C. Actualizar Barra Fuerza
+        # Actualizar Barra Fuerza
         f_actual = fuerza_hist[frame]
         bar_fuerza.set_height(f_actual)
         
-        # Retornamos los artistas que han cambiado para el blitting
+        # Devolvemos los artistas que han cambiado
         return bola, bar_vel, bar_fuerza
 
     ani = FuncAnimation(fig, update, frames=pasos, interval=(tiempo_final/pasos)*1000, blit=True)
@@ -474,12 +485,13 @@ def animar_control(FIS, init=(0,0), altura_deseada = 10.0, tiempo_final = 5, pas
     plt.tight_layout()
     plt.close()
     
-    
     return ani
 
 def optimizar_pso(n_e=3, n_v=3, num_particulas = 500, num_iteraciones = 100, init = [(0,0)], repes = 5,\
                   tipo = "gaussiano", paciencia = 30, tolerancia = 1e-4, noisy = True, common_noise = True,
                   pasos_tiempo = 100, t_max = 5, fis_iniciales = []):
+    
+    # Iniciación de los límites y las condiciones iniciales y gestión básica de las entradas
     if common_noise == False:
         noise = None
 
@@ -520,7 +532,7 @@ def optimizar_pso(n_e=3, n_v=3, num_particulas = 500, num_iteraciones = 100, ini
 
     velocidades_random = np.random.uniform(-2, 2, (num_random, dim))
 
-    posiciones = generar_poblacion(fis_iniciales, num_particulas, lim_min, lim_max)
+    posiciones = generar_poblacion(num_particulas, lim_min, lim_max, fis_buenos=fis_iniciales)
     velocidades = np.vstack((velocidades_dadas, velocidades_random))
 
     pbest_pos = np.copy(posiciones)
@@ -539,7 +551,7 @@ def optimizar_pso(n_e=3, n_v=3, num_particulas = 500, num_iteraciones = 100, ini
     gbest_pos = np.copy(pbest_pos[gbest_idx])
     gbest_perdida = pbest_perdidas[gbest_idx]
     
-    # Inicializamos los parámetros de actualización
+    # Inicializamos los parámetros de actualización de w, c1 y c2.
     w, c1, c2 = 0.99, 2.5, 0.5
     w_final, c1_final, c2_final = 0.4, 0.5, 2.5
     w_step, c1_step, c2_step = (w_final - w)/num_iteraciones, (c1_final-c1)/num_iteraciones, (c2_final- c2)/num_iteraciones
@@ -551,8 +563,10 @@ def optimizar_pso(n_e=3, n_v=3, num_particulas = 500, num_iteraciones = 100, ini
     
     print(f"Iniciando PSO para SugenoFIS ({n_e}x{n_v} reglas | {dim} dim | {num_particulas} particulas | {num_iteraciones} iteraciones)")
     for iteracion in range(num_iteraciones):
+        # Gestión del ruido común, si se elige
         if common_noise == True:
                 noise = np.random.normal(0, 1.5, size = pasos_tiempo)
+
         for j in range(num_particulas):
             # Ecuaciones estándar de PSO
             r1 = np.random.rand(dim)
@@ -564,7 +578,7 @@ def optimizar_pso(n_e=3, n_v=3, num_particulas = 500, num_iteraciones = 100, ini
             posiciones[j] += velocidades[j]
             posiciones[j] = np.clip(posiciones[j], lim_min, lim_max)
             
-            # Evaluación
+            # Evaluación. Si hay más de una condición inicial se hace la media.
             fis_actual = fis_desde_particula(posiciones[j], n_e, n_v, tipo)
 
             perdida = 0
@@ -573,8 +587,11 @@ def optimizar_pso(n_e=3, n_v=3, num_particulas = 500, num_iteraciones = 100, ini
                                     pasos_tiempo=pasos_tiempo)[0]/repes
             
             fis_pbest = fis_desde_particula(pbest_pos[j], n_e, n_v, tipo)
-            nueva_perdida_pbest = 0
+            
+            # Si estamos entrenando con ruido, hay que reevaluar el mejor FIS, para evitar
+            # que se guarde como el mejor un FIS "suertudo".
             if noisy:
+                nueva_perdida_pbest = 0
                 for init in lista_inits:
                     l_pbest, _ = simular_tubo(fis_pbest, init=init, noisy=noisy)
                     nueva_perdida_pbest += l_pbest / len(lista_inits)
@@ -594,6 +611,7 @@ def optimizar_pso(n_e=3, n_v=3, num_particulas = 500, num_iteraciones = 100, ini
         c1 = c1 + c1_step
         c2 = c2 + c2_step
 
+        # Gestión del early stopping
         if (mejor_historico - gbest_perdida) > tolerancia:
             mejor_historico = gbest_perdida
             generaciones_sin_mejora = 0
@@ -622,7 +640,7 @@ def optimizar_ga(n_e=3, n_v=3, tamano_poblacion = 1000, num_generaciones = 100, 
         
     dim = (n_e * 2) + (n_v * 2) + (n_e * n_v)
     
-    # Límites dinámicos (Permitiendo mayor solapamiento cerca del 0)
+    # Límites para la inicialización
     limites_min, limites_max = [], []
     limites_min.extend(np.linspace(-15, -2, n_e)); limites_max.extend(np.linspace(2, 15, n_e))
     limites_min.extend([1] * n_e); limites_max.extend([10.0] * n_e)
@@ -633,13 +651,12 @@ def optimizar_ga(n_e=3, n_v=3, tamano_poblacion = 1000, num_generaciones = 100, 
     lim_min = np.array(limites_min)
     lim_max = np.array(limites_max)
     
-
-    poblacion = generar_poblacion(fis_iniciales, tamano_poblacion, lim_min, lim_max)
+    poblacion = generar_poblacion(tamano_poblacion, lim_min, lim_max, fis_buenos=fis_iniciales)
     historial_convergencia = []
     
     print(f"Iniciando AG ({dim} dim | Población: {tamano_poblacion} | Generaciones: {num_generaciones})")
     
-    # Evaluamos la población inicial (fuera del bucle principal para tener un punto de partida)
+    # Evaluamos la población inicial
     perdidas = np.zeros(tamano_poblacion)
     for ind in range(tamano_poblacion):
         fis_temp = fis_desde_particula(poblacion[ind], n_e, n_v)
@@ -654,13 +671,14 @@ def optimizar_ga(n_e=3, n_v=3, tamano_poblacion = 1000, num_generaciones = 100, 
 
     for generacion in range(num_generaciones):
         
-        # 1. GENERAR RUIDO COMÚN PARA TODA LA GENERACIÓN
+        # Si tenemos el ruido común, se define ahora
         if common_noise:
             noise_generacion = np.random.normal(0, 1.5, size=pasos_tiempo)
         else:
             noise_generacion = None
 
-        # 2. RE-EVALUAR A LOS ÉLITES (Prueba de robustez)
+        # Si al hacer la mutación alguno de los demás ha superado a estos, se verifica ahora.
+        # También acelera la primera generación.
         for i in range(elitismo):
             fis_elite = fis_desde_particula(poblacion[i], n_e, n_v)
             perdida_revaluada = 0
@@ -670,7 +688,6 @@ def optimizar_ga(n_e=3, n_v=3, tamano_poblacion = 1000, num_generaciones = 100, 
                 perdida_revaluada += l / repes
             perdidas[i] = perdida_revaluada
 
-        # Re-ordenamos por si algún élite era un "farsante"
         indices_ordenados = np.argsort(perdidas)
         poblacion = poblacion[indices_ordenados]
         perdidas = perdidas[indices_ordenados]
@@ -684,7 +701,7 @@ def optimizar_ga(n_e=3, n_v=3, tamano_poblacion = 1000, num_generaciones = 100, 
         nueva_poblacion = np.zeros_like(poblacion)
         nueva_poblacion[0:elitismo] = poblacion[0:elitismo]
         
-        # 3. CREACIÓN DE LA NUEVA GENERACIÓN
+        # Creación de la nueva generación
         for i in range(elitismo, tamano_poblacion):
             # Selección por Torneo
             t1 = np.random.choice(tamano_poblacion, 3, replace=False)
@@ -692,15 +709,13 @@ def optimizar_ga(n_e=3, n_v=3, tamano_poblacion = 1000, num_generaciones = 100, 
             idx_p1, idx_p2 = min(t1), min(t2) # Menor índice = mejor individuo
             padre1, padre2 = poblacion[idx_p1], poblacion[idx_p2]
             
-            # CRUCE HEURÍSTICO: El padre con menor error aporta más genes (ej. 60-80%)
+            # Cruce. El padre con menor error aporta más información
             peso_padre1 = perdidas[idx_p2] / (perdidas[idx_p1] + perdidas[idx_p2] + 1e-6)
             # Acotamos para que haya mezcla real y no sea solo clonar
             peso_padre1 = np.clip(peso_padre1, 0.4, 0.9) 
             hijo = peso_padre1 * padre1 + (1 - peso_padre1) * padre2
             
-            # MUTACIÓN ADAPTATIVA BASADA EN RANKING
-            # i es el índice actual. i/tamano_poblacion va de ~0.0 a 1.0.
-            # Los peores individuos (i alto) sufren mutaciones hasta 3 veces más fuertes.
+            # Mutación adaptativa según el orden
             multiplicador_ranking = 1.0 + (2.0 * (i / tamano_poblacion))
             fuerza_actual = fuerza_mutacion_base * multiplicador_ranking
             
@@ -712,7 +727,7 @@ def optimizar_ga(n_e=3, n_v=3, tamano_poblacion = 1000, num_generaciones = 100, 
                     
             nueva_poblacion[i] = np.clip(hijo, lim_min, lim_max)
             
-        # Evaluamos solo a los hijos (los élites ya están evaluados)
+        # Evaluamos solo a los hijos
         for i in range(elitismo, tamano_poblacion):
             fis_temp = fis_desde_particula(nueva_poblacion[i], n_e, n_v)
             perdida_hijo = 0
@@ -723,11 +738,13 @@ def optimizar_ga(n_e=3, n_v=3, tamano_poblacion = 1000, num_generaciones = 100, 
             perdidas[i] = perdida_hijo
             
         poblacion = nueva_poblacion
-        # Decaimiento global suave de la mutación base
+
+        # Decaimiento de la mutación base
         fuerza_mutacion_base *= 0.985
 
     mejor_fis = fis_desde_particula(poblacion[0], n_e, n_v)
 
     if return_poblacion:
         return mejor_fis, historial_convergencia, poblacion
+    
     return mejor_fis, historial_convergencia
