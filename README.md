@@ -20,3 +20,5 @@ En **Trabajo IDIF.ipynb** están ejecutadas (en versiones reducidas por lo largo
 - **optimizar_pso**: Implementa la Optimización por Enjambre de Partículas (PSO). Lanza una "bandada" de posibles controladores matemáticos y ajusta sus parámetros iterativamente, haciendo que cada individuo aprenda de sus propios aciertos pasados y del mejor resultado global de todo el enjambre, buscando afinar el control del sistema de levitación.
 
 - **optimizar_ga**: Implementa el Algoritmo Genético (GA). Simula la evolución biológica sometiendo a una población de controladores a un proceso de selección por torneos, cruces heurísticos (mezclando los "genes" o parámetros de los mejores controladores) y mutaciones adaptativas para explorar de manera robusta el espacio de posibles soluciones matemáticas.
+
+En la carpeta FIS pickle hay muchos archivos .pkl de distintos FIS obtenidos en distintas iteraciones con ambos algoritmos y combinaciones para diferentes valores del tamaño de la población y el número de iteraciones. 
